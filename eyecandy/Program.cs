@@ -1,11 +1,8 @@
 ﻿using System;
-using System.Collections.Generic;
 using System.IO;
-using System.Linq;
 using System.Net;
 using System.Runtime.InteropServices;
-using System.Text;
-using System.Threading.Tasks;
+using System.Threading;
 using Newtonsoft.Json;
 
 namespace eyecandy
@@ -15,11 +12,104 @@ namespace eyecandy
         static void Main(string[] args)
         {
             int seed = DateTime.UtcNow.Millisecond;
-            var gen = new ApodWallpaperGenerator(seed);
-            byte[] wallpaper = gen.WallpaperProvider.Download(gen.IdGenerator.GenerateId());
+            IWallpaperDataRepository repo = new WallpaperDataRepository(Path.Combine(Path.GetTempPath(), "eyecandy"));
+            IWallpaperSetter setter = new WindowsWallpaperSetter(repo);
+            IWallpaperIdGenerator idGen = new ApodWallpaperIdGenerator(seed);
+            IWallpaperProvider provider = new CachedWallpaperProvider(repo, new ApodWallpaperProvider());
 
-            IWallpaperSetter setter = new WindowsWallpaperSetter();
-            setter.Set(wallpaper);
+            TimeSpan interval = TimeSpan.FromMinutes(10);
+
+            while (true)
+            {
+                var wallpaper = provider.Download(idGen.GenerateId());
+                setter.Set(wallpaper);
+
+                Console.WriteLine($"Sleeping {interval}");
+                Thread.Sleep(interval);
+            }
+        }
+    }
+
+    public class WallpaperData
+    {
+        public string Id;
+        public byte[] Wallpaper;
+        public string Explanation;
+    }
+
+    public interface IWallpaperDataRepository
+    {
+        void Store(WallpaperData data);
+        (bool found, WallpaperData data) TryGet(string id);
+    }
+
+    public interface IWallpaperProvider
+    {
+        WallpaperData Download(string id);
+    }
+
+    public interface IWallpaperIdGenerator
+    {
+        string GenerateId();
+    }
+
+    public interface IWallpaperGenerator
+    {
+        IWallpaperIdGenerator IdGenerator { get; }
+
+        IWallpaperProvider WallpaperProvider { get; }
+    }
+
+    public interface IWallpaperSetter
+    {
+        void Set(WallpaperData wallpaper);
+    }
+
+    public static class Extensions
+    {
+        public static WallpaperData Get(this IWallpaperDataRepository repo, string id)
+        {
+            var (found, data) = repo.TryGet(id);
+            if (!found) throw new ArgumentException($"{id} is not found in repo");
+            return data;
+        }
+    }
+
+    #region IMPL
+
+    public class WallpaperDataRepository : IWallpaperDataRepository
+    {
+        private readonly string root;
+
+        public WallpaperDataRepository(string root)
+        {
+            if (!Directory.Exists(root))
+            {
+                Directory.CreateDirectory(root);
+            }
+
+            this.root = root;
+        }
+
+        public (bool found, WallpaperData data) TryGet(string id)
+        {
+            string dataFile = Path.Combine(root, id);
+            if (!File.Exists(dataFile)) return (false, null);
+
+            using (StreamReader reader = new StreamReader(dataFile))
+            {
+                return (true, JsonConvert.DeserializeObject<WallpaperData>(reader.ReadToEnd()));
+            }
+        }
+
+        public void Store(WallpaperData data)
+        {
+            string dataFile = Path.Combine(root, data.Id);
+            Console.WriteLine($"Storing wallpaper data to {dataFile}");
+            using (StreamWriter wr = new StreamWriter(dataFile, append: false))
+            {
+                wr.Write(JsonConvert.SerializeObject(data));
+            }
         }
     }
 
@@ -30,20 +120,63 @@ namespace eyecandy
         [return: MarshalAs(UnmanagedType.Bool)]
         static extern bool SystemParametersInfo(uint uiAction, uint uiParam, String pvParam, uint fWinIni);
 
-        public void Set(byte[] wallpaper)
+        private readonly IWallpaperDataRepository repo;
+
+        public WindowsWallpaperSetter(IWallpaperDataRepository repo)
         {
-            string fn = Path.GetTempFileName();
-            using (Stream str = File.OpenWrite(fn))
+            this.repo = repo;
+        }
+
+        public void Set(WallpaperData wallpaper)
+        {
+            var data = repo.Get(wallpaper.Id);
+            string fn = Path.Combine(Path.GetTempPath(), "eyecandy.img");
+
+            using (var str = File.OpenWrite(fn))
             {
-                str.Write(wallpaper, 0, wallpaper.Length);
+                str.Seek(0, SeekOrigin.Begin);
+                str.Write(data.Wallpaper, 0, data.Wallpaper.Length);
+                str.SetLength(str.Position + 1);
             }
 
-            if(!SystemParametersInfo(0x14, 0, fn, 0x14))
+            Console.WriteLine($"Setting wallpaper to {fn}");
+            if (!SystemParametersInfo(0x14, 0, fn, 0x14))
             {
-                Console.WriteLine($"setting wallpaper ${fn} failed");
+                Console.WriteLine($"setting wallpaper {fn} failed");
+            }
+        }
+    }
+
+    public class CachedWallpaperProvider : IWallpaperProvider
+    {
+        private readonly IWallpaperDataRepository repo;
+        private readonly IWallpaperProvider provider;
+
+        public CachedWallpaperProvider(
+            IWallpaperDataRepository repo,
+            IWallpaperProvider provider)
+        {
+            this.repo = repo;
+            this.provider = provider;
+        }
+
+        public WallpaperData Download(string id)
+        {
+            var result = repo.TryGet(id);
+            if (result.found) return result.data;
+            Console.WriteLine($"cache miss, downloading using {this.provider.GetType().Name}");
+            var data = this.provider.Download(id);
+
+            try
+            {
+                this.repo.Store(data);
+            }
+            catch (Exception e)
+            {
+                Console.WriteLine($"Error storing data to repo: {e}");
             }
 
-            // TODO can I delete the file now?
+            return data;
         }
     }
 
@@ -58,20 +191,24 @@ namespace eyecandy
             public string url;
         }
 
-        public byte[] Download(string id)
+        public WallpaperData Download(string id)
         {
             string url = $"https://api.nasa.gov/planetary/apod?api_key=DEMO_KEY&date={id}&hd=True";
             Console.WriteLine($"Downloading from {url}");
             using (var client = new WebClient())
             {
                 string content = client.DownloadString(url);
+                Console.WriteLine($"APOD data: {content}");
                 ApodData data = JsonConvert.DeserializeObject<ApodData>(content);
-                if (data.hdurl == null)
-                {
-                    throw new InvalidDataException($"HD link is not available: {content}");
-                }
+                string picUrl = data.hdurl ?? data.url;
+                if (picUrl == null) throw new InvalidDataException($"picture url is not available: {content}");
 
-                return client.DownloadData(data.hdurl);
+                return new WallpaperData
+                {
+                    Id = id,
+                    Wallpaper = client.DownloadData(picUrl),
+                    Explanation = data.explanation,
+                };
             }
         }
     }
@@ -92,38 +229,5 @@ namespace eyecandy
         }
     }
 
-    public class ApodWallpaperGenerator : IWallpaperGenerator
-    {
-        public ApodWallpaperGenerator(int seed)
-        {
-            IdGenerator = new ApodWallpaperIdGenerator(seed);
-            WallpaperProvider = new ApodWallpaperProvider();
-        }
-
-        public IWallpaperIdGenerator IdGenerator { get; }
-
-        public IWallpaperProvider WallpaperProvider { get; }
-    }
-
-    public interface IWallpaperProvider
-    {
-        byte[] Download(string id);
-    }
-
-    public interface IWallpaperIdGenerator
-    {
-        string GenerateId();
-    }
-
-    public interface IWallpaperGenerator
-    {
-        IWallpaperIdGenerator IdGenerator { get; }
-
-        IWallpaperProvider WallpaperProvider { get; }
-    }
-
-    public interface IWallpaperSetter
-    {
-        void Set(byte[] wallpaper);
-    }
+    #endregion IMPL
 }
