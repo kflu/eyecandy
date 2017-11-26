@@ -18,8 +18,7 @@ namespace eyecandy
         {
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
-            var mainForm = new Form1();
-            Application.Run(mainForm);
+            Application.Run(new Form1());
         }
     }
 }

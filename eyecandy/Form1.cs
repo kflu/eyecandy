@@ -27,14 +27,14 @@ namespace eyecandy
         public Form1()
         {
             InitializeComponent();
-            this.log = msg =>
+            this.log = Utils.CreateLoggerWithTimestamp(msg =>
             {
                 this.Invoke(new UpdateLogMessagesDelegate(() =>
                 {
                     this.logMessages.AppendText(msg);
                     this.logMessages.AppendText(Environment.NewLine);
                 }));
-            };
+            });
 
             this.doUpdate = update =>
             {
@@ -55,7 +55,14 @@ namespace eyecandy
         private void Form1_Load(object sender, EventArgs e)
         {
             string[] args = Environment.GetCommandLineArgs();
-            if (!args.Contains("--start-visible"))
+
+            if (args.Contains("--start-visible"))
+            {
+                this.WindowState = FormWindowState.Normal;
+                this.ShowInTaskbar = true;
+                this.Show();
+            }
+            else
             {
                 this.WindowState = FormWindowState.Minimized;
                 this.ShowInTaskbar = false;
@@ -87,21 +94,6 @@ namespace eyecandy
             }
         }
 
-        private void Form1_FormClosed(object sender, FormClosedEventArgs e)
-        {
-            try
-            {
-                cancellationTokenSource.Cancel();
-                if (RunnerTask != null)
-                {
-                    Task.WaitAll(RunnerTask);
-                }
-            }
-            catch (Exception ex) when (IsTaskCancellationException(ex))
-            {
-            }
-        }
-
         bool IsTaskCancellationException(Exception e)
         {
             if (e is TaskCanceledException) return true;
@@ -122,10 +114,24 @@ namespace eyecandy
             this.Show();
         }
 
-        private void button1_Click(object sender, EventArgs e)
+        private void button1_Click(object sender, EventArgs e) => this.Hide();
+
+        private void Form1_FormClosing(object sender, FormClosingEventArgs e)
         {
-            this.Hide();
+            try
+            {
+                cancellationTokenSource.Cancel();
+                if (RunnerTask != null)
+                {
+                    // only wait this much time to prevent hang, which can occur when window is closed while a download is going on
+                    Task.WaitAll(new[] { RunnerTask }, TimeSpan.FromMilliseconds(100));
+                }
+            }
+            catch (Exception ex) when (IsTaskCancellationException(ex)) { /* task is cancelled this is normal */ }
+            catch (Exception ex) { this.log($"Error during shutting down: {ex}"); }
         }
+
+        private void Form1_FormClosed(object sender, FormClosedEventArgs e) => Application.Exit();
     }
 
     public class Runner

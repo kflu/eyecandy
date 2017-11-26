@@ -42,13 +42,21 @@ namespace eyecandy
         void Set(WallpaperData wallpaper);
     }
 
-    public static class Extensions
+    public static class Utils
     {
         public static WallpaperData Get(this IWallpaperDataRepository repo, string id)
         {
             var (found, data) = repo.TryGet(id);
             if (!found) throw new ArgumentException($"{id} is not found in repo");
             return data;
+        }
+
+        public static Action<string> CreateLoggerWithTimestamp(Action<string> innerLog)
+        {
+            return msg =>
+            {
+                innerLog($"{DateTime.Now.ToString("s")}: {msg}");
+            };
         }
     }
 
