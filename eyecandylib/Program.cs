@@ -3,7 +3,9 @@ using System.IO;
 using System.Net;
 using System.Runtime.InteropServices;
 using System.Threading;
+using System.Threading.Tasks;
 using Newtonsoft.Json;
+using System.Linq;
 
 namespace eyecandy
 {
@@ -62,6 +64,111 @@ namespace eyecandy
         }
     }
 
+    public class Runner
+    {
+        public delegate void DoUpdateDelegate(Action update);
+
+        public struct Config
+        {
+            public TimeSpan UpdateInterval;
+            public int NumberOfRetries;
+            public TimeSpan? RetryInterval;
+        }
+
+        private readonly Config config;
+        private readonly IWallpaperDataRepository repo;
+        private readonly IWallpaperSetter setter;
+        private readonly IWallpaperIdGenerator idGen;
+        private readonly IWallpaperProvider provider;
+        private readonly LogDelegate log;
+        private readonly CancellationTokenSource cancellationTokenSource;
+        private readonly DoUpdateDelegate doUpdate;
+
+        private readonly CancellationToken cancellationToken;
+        private Task task = null;
+
+        public Runner(
+            Config config,
+            IWallpaperDataRepository repo,
+            IWallpaperSetter setter,
+            IWallpaperIdGenerator idGen,
+            IWallpaperProvider provider,
+            DoUpdateDelegate update,
+            LogDelegate log,
+            CancellationTokenSource cancellationTokenSource)
+        {
+            this.config = config;
+            this.repo = repo;
+            this.setter = setter;
+            this.idGen = idGen;
+            this.provider = provider;
+            this.doUpdate = update;
+            this.log = log;
+            this.cancellationTokenSource = cancellationTokenSource;
+            this.cancellationToken = cancellationTokenSource.Token;
+        }
+
+        public void UpdateWallpaper()
+        {
+            for (int i = 0; ; i++)
+            {
+                try
+                {
+                    var wallpaper = provider.Download(idGen.GenerateId());
+                    setter.Set(wallpaper);
+                    return;
+                }
+                catch (DownloadFailedException e)
+                {
+                    if (i == config.NumberOfRetries) throw; // re-throw if exceeds number of retries
+
+                    this.log($"Error downloading wallpaper. I will retry. Error: {e}");
+                    if (config.RetryInterval != null)
+                    {
+                        Thread.Sleep(config.RetryInterval.Value);
+                    }
+                }
+            }
+        }
+
+        public void Start()
+        {
+            this.task = Task.Run(StartAsync);
+        }
+
+        public void Stop()
+        {
+            try
+            {
+                cancellationTokenSource.Cancel();
+                if (task != null)
+                {
+                    // only wait this much time to prevent hang, which can occur when window is closed while a download is going on
+                    Task.WaitAll(new[] { task }, TimeSpan.FromMilliseconds(100));
+                }
+            }
+            catch (Exception ex) when (IsTaskCancellationException(ex)) { /* task is cancelled this is normal */ }
+            catch (Exception ex) { this.log($"Error during shutting down: {ex}"); }
+        }
+
+        private async Task StartAsync()
+        {
+            while (!this.cancellationToken.IsCancellationRequested)
+            {
+                doUpdate(UpdateWallpaper);
+                log($"Sleeping {config.UpdateInterval}");
+                await Task.Delay(this.config.UpdateInterval, this.cancellationToken);
+            }
+        }
+
+        bool IsTaskCancellationException(Exception e)
+        {
+            if (e is TaskCanceledException) return true;
+            if (e is AggregateException) return ((AggregateException)e).InnerExceptions.All(ie => ie is TaskCanceledException);
+            return false;
+        }
+    }
+
     #region IMPL
 
     public class WallpaperDataRepository : IWallpaperDataRepository
@@ -74,9 +181,9 @@ namespace eyecandy
         private readonly Config config;
         private readonly LogDelegate log;
 
-        public WallpaperDataRepository(Config config, Func<LogDelegate> getLog)
+        public WallpaperDataRepository(Config config, LogDelegate log)
         {
-            this.log = getLog();
+            this.log = log;
             this.config = config;
 
             if (!Directory.Exists(config.Root))
@@ -117,10 +224,10 @@ namespace eyecandy
         private readonly IWallpaperDataRepository repo;
         private readonly LogDelegate log;
 
-        public WindowsWallpaperSetter(IWallpaperDataRepository repo, Func<LogDelegate> getLog)
+        public WindowsWallpaperSetter(IWallpaperDataRepository repo, LogDelegate log)
         {
             this.repo = repo;
-            this.log = getLog();
+            this.log = log;
         }
 
         public void Set(WallpaperData wallpaper)
@@ -143,45 +250,6 @@ namespace eyecandy
         }
     }
 
-    public class RobustWallpaperProvider : IWallpaperProvider
-    {
-        public struct Config
-        {
-            public int NumberOfRetries;
-            public TimeSpan? RetryInterval;
-        }
-
-        private readonly IWallpaperProvider provider;
-        private readonly Config config;
-
-        public RobustWallpaperProvider(
-            IWallpaperProvider provider,
-            Config config)
-        {
-            this.provider = provider;
-            this.config = config;
-        }
-
-        public WallpaperData Download(string id)
-        {
-            for (int i = 0; ; i++)
-            {
-                try
-                {
-                    return this.provider.Download(id);
-                }
-                catch (DownloadFailedException)
-                {
-                    if (i == config.NumberOfRetries) throw; // re-throw if exceeds number of retries
-                    if (config.RetryInterval != null)
-                    {
-                        Thread.Sleep(config.RetryInterval.Value);
-                    }
-                }
-            }
-        }
-    }
-
     public class CachedWallpaperProvider : IWallpaperProvider
     {
         private readonly IWallpaperDataRepository repo;
@@ -191,11 +259,11 @@ namespace eyecandy
         public CachedWallpaperProvider(
             IWallpaperDataRepository repo,
             IWallpaperProvider provider,
-            Func<LogDelegate> getLog)
+            LogDelegate log)
         {
             this.repo = repo;
             this.provider = provider;
-            this.log = getLog();
+            this.log = log;
         }
 
         public WallpaperData Download(string id)
@@ -228,9 +296,9 @@ namespace eyecandy
     {
         private readonly LogDelegate log;
 
-        public ApodWallpaperProvider(Func<LogDelegate> getLog)
+        public ApodWallpaperProvider(LogDelegate log)
         {
-            this.log = getLog();
+            this.log = log;
         }
 
         public class ApodData
@@ -274,7 +342,6 @@ namespace eyecandy
             public int Seed;
         }
 
-        private readonly Config config;
         private readonly Random rand;
 
         public ApodWallpaperIdGenerator(Config config)
