@@ -7,6 +7,8 @@ using Newtonsoft.Json;
 
 namespace eyecandy
 {
+    public delegate void LogDelegate(string msg);
+
     public class WallpaperData
     {
         public string Id;
@@ -51,7 +53,7 @@ namespace eyecandy
             return data;
         }
 
-        public static Action<string> CreateLoggerWithTimestamp(Action<string> innerLog)
+        public static LogDelegate CreateLoggerWithTimestamp(LogDelegate innerLog)
         {
             return msg =>
             {
@@ -64,23 +66,28 @@ namespace eyecandy
 
     public class WallpaperDataRepository : IWallpaperDataRepository
     {
-        private readonly string root;
-        private readonly Action<string> log;
-
-        public WallpaperDataRepository(string root, Action<string> log)
+        public struct Config
         {
-            this.log = log;
-            this.root = root;
+            public string Root;
+        }
 
-            if (!Directory.Exists(root))
+        private readonly Config config;
+        private readonly LogDelegate log;
+
+        public WallpaperDataRepository(Config config, Func<LogDelegate> getLog)
+        {
+            this.log = getLog();
+            this.config = config;
+
+            if (!Directory.Exists(config.Root))
             {
-                Directory.CreateDirectory(root);
+                Directory.CreateDirectory(config.Root);
             }
         }
 
         public (bool found, WallpaperData data) TryGet(string id)
         {
-            string dataFile = Path.Combine(root, id);
+            string dataFile = Path.Combine(config.Root, id);
             if (!File.Exists(dataFile)) return (false, null);
 
             using (StreamReader reader = new StreamReader(dataFile))
@@ -91,7 +98,7 @@ namespace eyecandy
 
         public void Store(WallpaperData data)
         {
-            string dataFile = Path.Combine(root, data.Id);
+            string dataFile = Path.Combine(config.Root, data.Id);
             log($"Storing wallpaper data to {dataFile}");
             using (StreamWriter wr = new StreamWriter(dataFile, append: false))
             {
@@ -108,12 +115,12 @@ namespace eyecandy
         static extern bool SystemParametersInfo(uint uiAction, uint uiParam, String pvParam, uint fWinIni);
 
         private readonly IWallpaperDataRepository repo;
-        private readonly Action<string> log;
+        private readonly LogDelegate log;
 
-        public WindowsWallpaperSetter(IWallpaperDataRepository repo, Action<string> log)
+        public WindowsWallpaperSetter(IWallpaperDataRepository repo, Func<LogDelegate> getLog)
         {
             this.repo = repo;
-            this.log = log;
+            this.log = getLog();
         }
 
         public void Set(WallpaperData wallpaper)
@@ -138,18 +145,21 @@ namespace eyecandy
 
     public class RobustWallpaperProvider : IWallpaperProvider
     {
+        public struct Config
+        {
+            public int NumberOfRetries;
+            public TimeSpan? RetryInterval;
+        }
+
         private readonly IWallpaperProvider provider;
-        private readonly int numberOfRetries;
-        private readonly TimeSpan? retryInterval;
+        private readonly Config config;
 
         public RobustWallpaperProvider(
             IWallpaperProvider provider,
-            int numberOfRetries,
-            TimeSpan? retryInterval)
+            Config config)
         {
             this.provider = provider;
-            this.numberOfRetries = numberOfRetries;
-            this.retryInterval = retryInterval;
+            this.config = config;
         }
 
         public WallpaperData Download(string id)
@@ -162,10 +172,10 @@ namespace eyecandy
                 }
                 catch (DownloadFailedException)
                 {
-                    if (i == numberOfRetries) throw; // re-throw if exceeds number of retries
-                    if (retryInterval != null)
+                    if (i == config.NumberOfRetries) throw; // re-throw if exceeds number of retries
+                    if (config.RetryInterval != null)
                     {
-                        Thread.Sleep(retryInterval.Value);
+                        Thread.Sleep(config.RetryInterval.Value);
                     }
                 }
             }
@@ -176,16 +186,16 @@ namespace eyecandy
     {
         private readonly IWallpaperDataRepository repo;
         private readonly IWallpaperProvider provider;
-        private readonly Action<string> log;
+        private readonly LogDelegate log;
 
         public CachedWallpaperProvider(
             IWallpaperDataRepository repo,
             IWallpaperProvider provider,
-            Action<string> log)
+            Func<LogDelegate> getLog)
         {
             this.repo = repo;
             this.provider = provider;
-            this.log = log;
+            this.log = getLog();
         }
 
         public WallpaperData Download(string id)
@@ -216,11 +226,11 @@ namespace eyecandy
 
     public class ApodWallpaperProvider : IWallpaperProvider
     {
-        private readonly Action<string> log;
+        private readonly LogDelegate log;
 
-        public ApodWallpaperProvider(Action<string> log)
+        public ApodWallpaperProvider(Func<LogDelegate> getLog)
         {
-            this.log = log;
+            this.log = getLog();
         }
 
         public class ApodData
@@ -259,10 +269,17 @@ namespace eyecandy
 
     public class ApodWallpaperIdGenerator : IWallpaperIdGenerator
     {
-        Random rand;
-        public ApodWallpaperIdGenerator(int seed)
+        public struct Config
         {
-            this.rand = new Random(seed);
+            public int Seed;
+        }
+
+        private readonly Config config;
+        private readonly Random rand;
+
+        public ApodWallpaperIdGenerator(Config config)
+        {
+            this.rand = new Random(config.Seed);
         }
 
         public string GenerateId()

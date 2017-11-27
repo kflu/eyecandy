@@ -15,41 +15,41 @@ namespace eyecandy
 {
     public partial class Form1 : Form
     {
+        private delegate void UpdateLogMessagesDelegate();
+        private delegate void UpdateButtonDelegate();
+
+        private readonly LogDelegate log;
         private Runner runner = null;
-        private Task RunnerTask = null;
-        private CancellationTokenSource cancellationTokenSource = null;
-        private readonly Action<string> log;
-        private readonly Action<Action> doUpdate;
 
-        delegate void UpdateLogMessagesDelegate();
-        delegate void UpdateButtonDelegate();
+        public Form1(
+            Runner runner,
+            Func<Form1, LogDelegate> createLog) 
+            : base()
+        {
+            this.runner = runner;
+            this.log = createLog(this);
+        }
 
-        public Form1()
+        private Form1()
         {
             InitializeComponent();
-            this.log = Utils.CreateLoggerWithTimestamp(msg =>
+        }
+
+        public static LogDelegate CreateLog(Form1 form)
+        {
+            return msg =>
             {
-                this.Invoke(new UpdateLogMessagesDelegate(() =>
+                form.Invoke(new UpdateLogMessagesDelegate(() =>
                 {
-                    this.logMessages.AppendText(msg);
-                    this.logMessages.AppendText(Environment.NewLine);
-                }));
-            });
-
-            this.doUpdate = update =>
-            {
-                this.Invoke(new UpdateButtonDelegate(() =>
-                {
-                    this.buttonChangeWallpaper.Enabled = false;
-                }));
-
-                update();
-
-                this.Invoke(new UpdateButtonDelegate(() =>
-                {
-                    this.buttonChangeWallpaper.Enabled = true;
+                    form.logMessages.AppendText(msg);
+                    form.logMessages.AppendText(Environment.NewLine);
                 }));
             };
+        }
+
+        public void Log(string msg)
+        {
+            this.log(msg);
         }
 
         private void Form1_Load(object sender, EventArgs e)
@@ -70,41 +70,33 @@ namespace eyecandy
 
             this.notifyIcon.Visible = true;
 
-            int seed = DateTime.UtcNow.Millisecond;
-            IWallpaperDataRepository repo = new WallpaperDataRepository(Path.Combine(Path.GetTempPath(), "eyecandy"), log);
-            IWallpaperSetter setter = new WindowsWallpaperSetter(repo, log);
-            IWallpaperIdGenerator idGen = new ApodWallpaperIdGenerator(seed);
-
-            IWallpaperProvider provider = new CachedWallpaperProvider(
-                repo, 
-                new RobustWallpaperProvider(
-                    new ApodWallpaperProvider(log),
-                    numberOfRetries: 10,
-                    retryInterval: TimeSpan.FromSeconds(30)), 
-                log);
-
             TimeSpan interval = TimeSpan.FromMinutes(10);
-            cancellationTokenSource = new CancellationTokenSource();
-
-            this.runner = new Runner(interval, seed, repo, setter, idGen, provider, doUpdate, log, cancellationTokenSource.Token);
 
             if (!args.Contains("--no-auto-start"))
             {
-                RunnerTask = Task.Run(() => this.runner.Start());
+                this.runner.Start();
             }
         }
 
-        bool IsTaskCancellationException(Exception e)
+        public void DoUpdate(Action update)
         {
-            if (e is TaskCanceledException) return true;
-            if (e is AggregateException) return ((AggregateException)e).InnerExceptions.All(ie => ie is TaskCanceledException);
-            return false;
+            this.Invoke(new UpdateButtonDelegate(() =>
+            {
+                this.buttonChangeWallpaper.Enabled = false;
+            }));
+
+            update();
+
+            this.Invoke(new UpdateButtonDelegate(() =>
+            {
+                this.buttonChangeWallpaper.Enabled = true;
+            }));
         }
 
         private void buttonChangeWallpaper_Click(object sender, EventArgs e)
         {
             this.log("updating wallpaper");
-            Task.Run(() => this.doUpdate(this.runner.UpdateWallpaper));
+            Task.Run(() => this.DoUpdate(this.runner.UpdateWallpaper));
         }
 
         private void notifyIcon_DoubleClick(object sender, EventArgs e)
@@ -118,17 +110,7 @@ namespace eyecandy
 
         private void Form1_FormClosing(object sender, FormClosingEventArgs e)
         {
-            try
-            {
-                cancellationTokenSource.Cancel();
-                if (RunnerTask != null)
-                {
-                    // only wait this much time to prevent hang, which can occur when window is closed while a download is going on
-                    Task.WaitAll(new[] { RunnerTask }, TimeSpan.FromMilliseconds(100));
-                }
-            }
-            catch (Exception ex) when (IsTaskCancellationException(ex)) { /* task is cancelled this is normal */ }
-            catch (Exception ex) { this.log($"Error during shutting down: {ex}"); }
+            runner.Stop();
         }
 
         private void Form1_FormClosed(object sender, FormClosedEventArgs e) => Application.Exit();
@@ -136,36 +118,44 @@ namespace eyecandy
 
     public class Runner
     {
-        private readonly TimeSpan interval;
-        private readonly int seed;
+        public delegate void DoUpdateDelegate(Action update);
+
+        public struct Config
+        {
+            public TimeSpan Interval;
+        }
+
+        private readonly Config config;
         private readonly IWallpaperDataRepository repo;
         private readonly IWallpaperSetter setter;
         private readonly IWallpaperIdGenerator idGen;
         private readonly IWallpaperProvider provider;
-        private readonly Action<string> log;
+        private readonly LogDelegate log;
+        private readonly CancellationTokenSource cancellationTokenSource;
+        private readonly DoUpdateDelegate doUpdate;
+
         private readonly CancellationToken cancellationToken;
-        private readonly Action<Action> doUpdate;
+        private Task task = null;
 
         public Runner(
-            TimeSpan interval,
-            int seed,
+            Config config,
             IWallpaperDataRepository repo,
             IWallpaperSetter setter,
             IWallpaperIdGenerator idGen,
             IWallpaperProvider provider,
-            Action<Action> doUpdate,
-            Action<string> log,
-            CancellationToken cancellationToken)
+            Func<DoUpdateDelegate> getUpdater,
+            Func<LogDelegate> getLog,
+            CancellationTokenSource cancellationTokenSource)
         {
-            this.interval = interval;
-            this.seed = seed;
+            this.config = config;
             this.repo = repo;
             this.setter = setter;
             this.idGen = idGen;
             this.provider = provider;
-            this.doUpdate = doUpdate;
-            this.log = log;
-            this.cancellationToken = cancellationToken;
+            this.doUpdate = getUpdater();
+            this.log = getLog();
+            this.cancellationTokenSource = cancellationTokenSource;
+            this.cancellationToken = cancellationTokenSource.Token;
         }
 
         public void UpdateWallpaper()
@@ -174,14 +164,41 @@ namespace eyecandy
             setter.Set(wallpaper);
         }
 
-        public async Task Start()
+        public void Start()
+        {
+            this.task = Task.Run(StartAsync);
+        }
+
+        public void Stop()
+        {
+            try
+            {
+                cancellationTokenSource.Cancel();
+                if (task != null)
+                {
+                    // only wait this much time to prevent hang, which can occur when window is closed while a download is going on
+                    Task.WaitAll(new[] { task }, TimeSpan.FromMilliseconds(100));
+                }
+            }
+            catch (Exception ex) when (IsTaskCancellationException(ex)) { /* task is cancelled this is normal */ }
+            catch (Exception ex) { this.log($"Error during shutting down: {ex}"); }
+        }
+
+        private async Task StartAsync()
         {
             while (!this.cancellationToken.IsCancellationRequested)
             {
                 doUpdate(UpdateWallpaper);
-                log($"Sleeping {interval}");
-                await Task.Delay(this.interval, this.cancellationToken);
+                log($"Sleeping {config.Interval}");
+                await Task.Delay(this.config.Interval, this.cancellationToken);
             }
+        }
+
+        bool IsTaskCancellationException(Exception e)
+        {
+            if (e is TaskCanceledException) return true;
+            if (e is AggregateException) return ((AggregateException)e).InnerExceptions.All(ie => ie is TaskCanceledException);
+            return false;
         }
     }
 }
