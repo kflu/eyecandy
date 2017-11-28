@@ -54,7 +54,7 @@
             this.logMessages.Name = "logMessages";
             this.logMessages.ReadOnly = true;
             this.logMessages.ScrollBars = System.Windows.Forms.ScrollBars.Both;
-            this.logMessages.Size = new System.Drawing.Size(758, 189);
+            this.logMessages.Size = new System.Drawing.Size(795, 408);
             this.logMessages.TabIndex = 0;
             this.logMessages.WordWrap = false;
             // 
@@ -82,7 +82,7 @@
             // 
             this.AutoScaleDimensions = new System.Drawing.SizeF(8F, 16F);
             this.AutoScaleMode = System.Windows.Forms.AutoScaleMode.Font;
-            this.ClientSize = new System.Drawing.Size(782, 253);
+            this.ClientSize = new System.Drawing.Size(819, 472);
             this.Controls.Add(this.button1);
             this.Controls.Add(this.buttonChangeWallpaper);
             this.Controls.Add(this.logMessages);

@@ -18,6 +18,7 @@ namespace eyecandy
 
         private delegate void UpdateLogMessagesDelegate();
         private delegate void UpdateButtonDelegate();
+        private delegate void UpdateNotifyIconDelegate();
 
         private readonly Runner runner;
         private readonly Config config;
@@ -59,6 +60,7 @@ namespace eyecandy
 
         private void Log(string msg)
         {
+            msg = $"{DateTime.Now.ToString("s")}: {msg}";
             this.Invoke(new UpdateLogMessagesDelegate(() =>
             {
                 this.logMessages.AppendText(msg);
@@ -90,19 +92,12 @@ namespace eyecandy
             }
         }
 
-        public void DoUpdate(Action update)
+        public void DoUpdate(Func<WallpaperData> update)
         {
-            this.Invoke(new UpdateButtonDelegate(() =>
-            {
-                this.buttonChangeWallpaper.Enabled = false;
-            }));
-
-            update();
-
-            this.Invoke(new UpdateButtonDelegate(() =>
-            {
-                this.buttonChangeWallpaper.Enabled = true;
-            }));
+            this.Invoke(new UpdateButtonDelegate(() => this.buttonChangeWallpaper.Enabled = false));
+            var wallpaper = update();
+            this.Invoke(new UpdateButtonDelegate(() => this.buttonChangeWallpaper.Enabled = true));
+            this.Log($"Current wallpaper: {wallpaper.Explanation}");
         }
 
         private void buttonChangeWallpaper_Click(object sender, EventArgs e)

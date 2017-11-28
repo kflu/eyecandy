@@ -66,7 +66,7 @@ namespace eyecandy
 
     public class Runner
     {
-        public delegate void DoUpdateDelegate(Action update);
+        public delegate void DoUpdateDelegate(Func<WallpaperData> update);
 
         public struct Config
         {
@@ -108,7 +108,7 @@ namespace eyecandy
             this.cancellationToken = cancellationTokenSource.Token;
         }
 
-        public void UpdateWallpaper()
+        public WallpaperData UpdateWallpaper()
         {
             for (int i = 0; ; i++)
             {
@@ -116,7 +116,7 @@ namespace eyecandy
                 {
                     var wallpaper = provider.Download(idGen.GenerateId());
                     setter.Set(wallpaper);
-                    return;
+                    return wallpaper;
                 }
                 catch (DownloadFailedException e)
                 {
